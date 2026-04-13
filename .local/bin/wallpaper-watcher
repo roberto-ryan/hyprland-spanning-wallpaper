@@ -1,0 +1,20 @@
+#!/bin/bash
+# Auto-span wallpaper whenever ~/.config/omarchy/current/background changes
+
+WATCH_DIR="$HOME/.config/omarchy/current"
+BACKGROUND="$WATCH_DIR/background"
+
+apply_wallpaper() {
+    sleep 0.3
+    rwpspread -b hyprpaper -i "$BACKGROUND" 2>/dev/null
+}
+
+# Apply on startup
+apply_wallpaper
+
+# Watch directory for any changes to the background symlink
+inotifywait -m -e create,delete,modify,moved_to,attrib "$WATCH_DIR" 2>/dev/null | while read -r dir event file; do
+    if [[ "$file" == "background" ]]; then
+        apply_wallpaper
+    fi
+done

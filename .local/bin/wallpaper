@@ -1,0 +1,24 @@
+#!/bin/bash
+# Set spanning wallpaper across all monitors
+# Usage: wallpaper /path/to/image.jpg
+
+if [[ -z "$1" ]]; then
+    echo "Usage: wallpaper /path/to/image.jpg"
+    echo "Current: $(readlink -f ~/.config/omarchy/current/background)"
+    exit 1
+fi
+
+IMAGE="$(realpath "$1")"
+
+if [[ ! -f "$IMAGE" ]]; then
+    echo "Error: File not found: $IMAGE"
+    exit 1
+fi
+
+# Update the Omarchy background symlink
+ln -sf "$IMAGE" ~/.config/omarchy/current/background
+
+# Apply spanning wallpaper
+rwpspread -b hyprpaper -i "$IMAGE"
+
+echo "Wallpaper set: $IMAGE"
