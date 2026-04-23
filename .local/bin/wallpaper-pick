@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Interactive wallpaper picker: browse ~/Pictures/wallpapers with a GTK file
+# chooser, then apply the selection as a spanning wallpaper.
+#
+# Uses pre-split JPEG tile caching (same as wallpaper-random) so repeated
+# selections of the same image apply in under 200 ms.
+set -euo pipefail
+
+WALLPAPER_DIR="${WALLPAPER_PICK_DIR:-$HOME/Pictures/wallpapers}"
+WALLPAPER_HELPER="${WALLPAPER_PICK_HELPER:-$HOME/.local/bin/wallpaper}"
+CACHE_DIR="${WALLPAPER_PICK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/wallpaper-pick}"
+TILES_DIR="$CACHE_DIR/tiles"
+TILE_QUALITY="${WALLPAPER_PICK_TILE_QUALITY:-92}"
+
+mkdir -p "$TILES_DIR"
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 && notify-send "$@" || true
+}
+
+# --- Tile helpers (mirrored from wallpaper-random for consistency) ---
+
+split_image_to_tiles() {
+  local image="$1" sidecar="$2"
+  local tmpdir png base stem hash mon dest_jpg
+
+  command -v rwpspread >/dev/null 2>&1 || return 1
+  command -v magick    >/dev/null 2>&1 || return 1
+
+  tmpdir="$(mktemp -d "$TILES_DIR/.split.XXXXXX")" || return 1
+
+  if ! rwpspread -i "$image" -o "$tmpdir" >/dev/null 2>&1; then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  : >"$sidecar.tmp"
+  while IFS= read -r png; do
+    [[ -n "$png" ]] || continue
+    base="${png##*/}"
+    stem="${base%.png}"
+    if [[ "$stem" =~ ^rwps_(.+)_[a-f0-9]{64}$ ]]; then
+      mon="${BASH_REMATCH[1]}"
+      hash="${stem##*_}"
+    else
+      continue
+    fi
+    dest_jpg="$TILES_DIR/rwps_${mon}_${hash}.jpg"
+    if [[ ! -f "$dest_jpg" ]]; then
+      magick "$png" -quality "$TILE_QUALITY" -strip "$dest_jpg" 2>/dev/null || {
+        rm -f "$dest_jpg"
+        continue
+      }
+    fi
+    printf '%s\n' "$dest_jpg" >>"$sidecar.tmp"
+  done < <(find "$tmpdir" -maxdepth 1 -type f -name 'rwps_*.png')
+
+  rm -rf "$tmpdir"
+
+  if [[ ! -s "$sidecar.tmp" ]]; then
+    rm -f "$sidecar.tmp"
+    return 1
+  fi
+  mv -f "$sidecar.tmp" "$sidecar"
+}
+
+# --- Main ---
+
+# Open GTK file chooser rooted at the wallpaper directory.
+IMAGE="$(zenity --file-selection \
+  --title="Pick a wallpaper" \
+  --filename="$WALLPAPER_DIR/" \
+  --file-filter="Images | *.jpg *.jpeg *.png *.webp" \
+  2>/dev/null)" || exit 0
+
+[[ -f "$IMAGE" ]] || { notify "Wallpaper" "File not found: $IMAGE"; exit 1; }
+
+# Content-addressed sidecar: hash the image path so the same file always
+# reuses its cached tiles.
+img_hash="$(sha256sum "$IMAGE" | cut -d' ' -f1)"
+sidecar="$CACHE_DIR/.pick_${img_hash}.tiles"
+
+# Split tiles if not already cached.
+if [[ ! -s "$sidecar" ]]; then
+  split_image_to_tiles "$IMAGE" "$sidecar" || true
+fi
+
+# Apply via the wallpaper helper (fast IPC path if tiles exist).
+if [[ -s "$sidecar" ]]; then
+  "$WALLPAPER_HELPER" --tiles "$sidecar" "$IMAGE"
+else
+  "$WALLPAPER_HELPER" "$IMAGE"
+fi
+
+notify "Wallpaper" "Applied: $(basename "$IMAGE")"
