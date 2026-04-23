@@ -3,6 +3,7 @@
 
 WATCH_DIR="$HOME/.config/omarchy/current"
 BACKGROUND="$WATCH_DIR/background"
+SKIP_FILE="$WATCH_DIR/.wallpaper-skip"
 
 apply_wallpaper() {
     sleep 0.3
@@ -15,6 +16,12 @@ apply_wallpaper
 # Watch directory for any changes to the background symlink
 inotifywait -m -e create,delete,modify,moved_to,attrib "$WATCH_DIR" 2>/dev/null | while read -r dir event file; do
     if [[ "$file" == "background" ]]; then
+        # If the wallpaper helper already applied via IPC, skip the redundant
+        # rwpspread re-apply that would cause a visible flash.
+        if [[ -f "$SKIP_FILE" ]]; then
+            rm -f "$SKIP_FILE"
+            continue
+        fi
         apply_wallpaper
     fi
 done

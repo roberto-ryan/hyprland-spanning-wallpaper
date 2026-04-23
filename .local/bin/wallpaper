@@ -1,24 +1,111 @@
-#!/bin/bash
-# Set spanning wallpaper across all monitors
-# Usage: wallpaper /path/to/image.jpg
+#!/usr/bin/env bash
+# Spanning wallpaper helper: updates the Omarchy background symlink and
+# applies the image across all monitors. Two modes:
+#   - With pre-split tile sidecar: issue hyprpaper IPC directly (fast path).
+#   - Without: run rwpspread -b hyprpaper (does the split inline).
+set -euo pipefail
 
-if [[ -z "$1" ]]; then
-    echo "Usage: wallpaper /path/to/image.jpg"
-    echo "Current: $(readlink -f ~/.config/omarchy/current/background)"
+LINK="$HOME/.config/omarchy/current/background"
+WATCHER_SKIP="$HOME/.config/omarchy/current/.wallpaper-skip"
+TILES_SIDECAR=""
+
+usage() {
+  cat <<USAGE
+Usage: wallpaper <path>                       Set spanning wallpaper from file.
+       wallpaper --tiles <sidecar> <path>     Apply pre-split tiles listed in <sidecar>.
+       wallpaper --refresh                    Reapply the current background (no symlink change).
+       wallpaper                              Print the current wallpaper path.
+
+<sidecar> is a text file with one absolute tile path per line; tile filenames
+must be of the form rwps_<MONITOR>_<HASH>.png (as produced by rwpspread).
+USAGE
+}
+
+case "${1:-}" in
+  "")
+    if [[ -L "$LINK" ]]; then
+      readlink -f "$LINK"
+      exit 0
+    fi
+    usage
     exit 1
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  --refresh | -r)
+    IMAGE="$(readlink -f "$LINK" 2>/dev/null || true)"
+    [[ -n "$IMAGE" && -f "$IMAGE" ]] || {
+      echo "wallpaper: no current background to refresh" >&2
+      exit 1
+    }
+    ;;
+  --tiles)
+    TILES_SIDECAR="${2:-}"
+    IMAGE_ARG="${3:-}"
+    [[ -n "$TILES_SIDECAR" && -f "$TILES_SIDECAR" ]] || {
+      echo "wallpaper: --tiles requires an existing sidecar file" >&2
+      exit 2
+    }
+    [[ -n "$IMAGE_ARG" ]] || {
+      echo "wallpaper: --tiles requires an image path" >&2
+      exit 2
+    }
+    IMAGE="$(realpath -- "$IMAGE_ARG")"
+    [[ -f "$IMAGE" ]] || {
+      echo "wallpaper: not a file: $IMAGE_ARG" >&2
+      exit 1
+    }
+    mkdir -p "$(dirname "$LINK")"
+    touch "$WATCHER_SKIP"
+    ln -sfn "$IMAGE" "$LINK"
+    ;;
+  *)
+    IMAGE="$(realpath -- "$1")"
+    [[ -f "$IMAGE" ]] || {
+      echo "wallpaper: not a file: $1" >&2
+      exit 1
+    }
+    mkdir -p "$(dirname "$LINK")"
+    touch "$WATCHER_SKIP"
+    ln -sfn "$IMAGE" "$LINK"
+    ;;
+esac
+
+if [[ -n "$TILES_SIDECAR" ]]; then
+  command -v hyprctl >/dev/null 2>&1 || {
+    echo "wallpaper: hyprctl not available" >&2
+    exit 1
+  }
+
+  # Preload first (idempotent — no-op if already loaded), then set wallpaper.
+  # hyprpaper <= 0.8.3 returns non-zero from `preload` even on success; the
+  # image still loads, so we tolerate the exit code here.
+  while IFS= read -r tile || [[ -n "$tile" ]]; do
+    [[ -n "$tile" && -f "$tile" ]] || continue
+    hyprctl hyprpaper preload "$tile" >/dev/null 2>&1 || true
+  done <"$TILES_SIDECAR"
+
+  while IFS= read -r tile || [[ -n "$tile" ]]; do
+    [[ -n "$tile" && -f "$tile" ]] || continue
+    base="${tile##*/}"
+    stem="${base%.*}"
+    if [[ "$stem" =~ ^rwps_(.+)_[a-f0-9]{64}$ ]]; then
+      mon="${BASH_REMATCH[1]}"
+    else
+      echo "wallpaper: cannot parse monitor from tile: $base" >&2
+      continue
+    fi
+    hyprctl hyprpaper wallpaper "$mon,$tile" >/dev/null
+  done <"$TILES_SIDECAR"
+
+  exit 0
 fi
 
-IMAGE="$(realpath "$1")"
+command -v rwpspread >/dev/null 2>&1 || {
+  echo "wallpaper: rwpspread not installed (install from AUR: paru -S rwpspread)" >&2
+  exit 1
+}
 
-if [[ ! -f "$IMAGE" ]]; then
-    echo "Error: File not found: $IMAGE"
-    exit 1
-fi
-
-# Update the Omarchy background symlink
-ln -sf "$IMAGE" ~/.config/omarchy/current/background
-
-# Apply spanning wallpaper
-rwpspread -b hyprpaper -i "$IMAGE"
-
-echo "Wallpaper set: $IMAGE"
+exec rwpspread -b hyprpaper -i "$IMAGE"
