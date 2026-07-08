@@ -22,12 +22,15 @@ notify() {
 
 split_image_to_tiles() {
   local image="$1" sidecar="$2"
-  local tmpdir png base stem hash mon dest_jpg
+  local tmpdir png base stem hash mon dest_jpg img_hash
 
   command -v rwpspread >/dev/null 2>&1 || return 1
   command -v magick    >/dev/null 2>&1 || return 1
 
   tmpdir="$(mktemp -d "$TILES_DIR/.split.XXXXXX")" || return 1
+
+  # Deterministic hash: sha256 of the source image file content.
+  img_hash="$(sha256sum "$image" | cut -d' ' -f1)"
 
   if ! rwpspread -i "$image" -o "$tmpdir" >/dev/null 2>&1; then
     rm -rf "$tmpdir"
@@ -41,11 +44,11 @@ split_image_to_tiles() {
     stem="${base%.png}"
     if [[ "$stem" =~ ^rwps_(.+)_[a-f0-9]{64}$ ]]; then
       mon="${BASH_REMATCH[1]}"
-      hash="${stem##*_}"
     else
       continue
     fi
-    dest_jpg="$TILES_DIR/rwps_${mon}_${hash}.jpg"
+    # Use our deterministic hash, not rwpspread's non-deterministic one.
+    dest_jpg="$TILES_DIR/rwps_${mon}_${img_hash}.jpg"
     if [[ ! -f "$dest_jpg" ]]; then
       magick "$png" -quality "$TILE_QUALITY" -strip "$dest_jpg" 2>/dev/null || {
         rm -f "$dest_jpg"

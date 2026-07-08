@@ -79,28 +79,43 @@ if [[ -n "$TILES_SIDECAR" ]]; then
     exit 1
   }
 
-  # Preload first (idempotent — no-op if already loaded), then set wallpaper.
-  # hyprpaper <= 0.8.3 returns non-zero from `preload` even on success; the
-  # image still loads, so we tolerate the exit code here.
+  # Verify all tiles exist before applying. If any are missing (e.g.
+  # deleted by gc_tiles or stale sidecar from a previous rwpspread run
+  # with non-deterministic hashing), fall back to rwpspread so every
+  # monitor gets the wallpaper instead of silently skipping monitors.
+  missing_tiles=0
   while IFS= read -r tile || [[ -n "$tile" ]]; do
-    [[ -n "$tile" && -f "$tile" ]] || continue
-    hyprctl hyprpaper preload "$tile" >/dev/null 2>&1 || true
+    [[ -n "$tile" ]] || continue
+    [[ -f "$tile" ]] || { missing_tiles=1; break; }
   done <"$TILES_SIDECAR"
 
-  while IFS= read -r tile || [[ -n "$tile" ]]; do
-    [[ -n "$tile" && -f "$tile" ]] || continue
-    base="${tile##*/}"
-    stem="${base%.*}"
-    if [[ "$stem" =~ ^rwps_(.+)_[a-f0-9]{64}$ ]]; then
-      mon="${BASH_REMATCH[1]}"
-    else
-      echo "wallpaper: cannot parse monitor from tile: $base" >&2
-      continue
-    fi
-    hyprctl hyprpaper wallpaper "$mon,$tile" >/dev/null
-  done <"$TILES_SIDECAR"
+  if [[ "$missing_tiles" -ne 0 ]]; then
+    echo "wallpaper: tiles missing from sidecar $TILES_SIDECAR, falling back to rwpspread" >&2
+  else
+    # Preload first (idempotent — no-op if already loaded), then set wallpaper.
+    # hyprpaper <= 0.8.3 returns non-zero from `preload` even on success; the
+    # image still loads, so we tolerate the exit code here.
+    while IFS= read -r tile || [[ -n "$tile" ]]; do
+      [[ -n "$tile" && -f "$tile" ]] || continue
+      hyprctl hyprpaper preload "$tile" >/dev/null 2>&1 || true
+    done <"$TILES_SIDECAR"
 
-  exit 0
+    while IFS= read -r tile || [[ -n "$tile" ]]; do
+      [[ -n "$tile" && -f "$tile" ]] || continue
+      base="${tile##*/}"
+      stem="${base%.*}"
+      if [[ "$stem" =~ ^rwps_(.+)_[a-f0-9]{64}$ ]]; then
+        mon="${BASH_REMATCH[1]}"
+      else
+        echo "wallpaper: cannot parse monitor from tile: $base" >&2
+        continue
+      fi
+      hyprctl hyprpaper wallpaper "$mon,$tile" >/dev/null
+    done <"$TILES_SIDECAR"
+
+    exit 0
+  fi
+  # Missing tiles: fall through to rwpspread fallback below.
 fi
 
 command -v rwpspread >/dev/null 2>&1 || {
