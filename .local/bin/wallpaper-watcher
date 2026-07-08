@@ -1,19 +1,119 @@
-#!/bin/bash
-# Auto-span wallpaper whenever ~/.config/omarchy/current/background changes
+#!/usr/bin/env bash
+# Auto-span wallpaper whenever ~/.config/omarchy/current/background changes.
+#
+# Uses the fast IPC path (wallpaper --tiles) when pre-split JPEG tiles are
+# available for the current background, falling back to rwpspread only when
+# no tiles exist. This eliminates the 2-3 s rwpspread re-split on startup
+# and on external changes (theme switches, etc.) when tiles are cached.
+set -euo pipefail
 
 WATCH_DIR="$HOME/.config/omarchy/current"
 BACKGROUND="$WATCH_DIR/background"
 SKIP_FILE="$WATCH_DIR/.wallpaper-skip"
+WALLPAPER_HELPER="${WALLPAPER_HELPER:-$HOME/.local/bin/wallpaper}"
 
-apply_wallpaper() {
-    sleep 0.3
-    rwpspread -b hyprpaper -i "$BACKGROUND" 2>/dev/null
+# Tile cache (shared with wallpaper-pick).
+CACHE_DIR="${WALLPAPER_PICK_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/wallpaper-pick}"
+TILES_DIR="$CACHE_DIR/tiles"
+TILE_QUALITY="${WALLPAPER_PICK_TILE_QUALITY:-92}"
+
+mkdir -p "$TILES_DIR"
+
+# --- Single-instance guard --------------------------------------------------
+# Prevent multiple watchers from running (e.g. after Hyprland reload).
+exec 8>"$CACHE_DIR/.watcher.lock"
+if command -v flock >/dev/null 2>&1; then
+  flock -n 8 || { echo "wallpaper-watcher: already running"; exit 0; }
+fi
+
+# --- Tile helpers (mirrored from wallpaper-pick for the fast path) ----------
+
+split_image_to_tiles() {
+  local image="$1" sidecar="$2"
+  local tmpdir png base stem hash mon dest_jpg
+
+  command -v rwpspread >/dev/null 2>&1 || return 1
+  command -v magick    >/dev/null 2>&1 || return 1
+
+  tmpdir="$(mktemp -d "$TILES_DIR/.split.XXXXXX")" || return 1
+
+  if ! rwpspread -i "$image" -o "$tmpdir" >/dev/null 2>&1; then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  : >"$sidecar.tmp"
+  while IFS= read -r png; do
+    [[ -n "$png" ]] || continue
+    base="${png##*/}"
+    stem="${base%.png}"
+    if [[ "$stem" =~ ^rwps_(.+)_[a-f0-9]{64}$ ]]; then
+      mon="${BASH_REMATCH[1]}"
+      hash="${stem##*_}"
+    else
+      continue
+    fi
+    dest_jpg="$TILES_DIR/rwps_${mon}_${hash}.jpg"
+    if [[ ! -f "$dest_jpg" ]]; then
+      magick "$png" -quality "$TILE_QUALITY" -strip "$dest_jpg" 2>/dev/null || {
+        rm -f "$dest_jpg"
+        continue
+      }
+    fi
+    printf '%s\n' "$dest_jpg" >>"$sidecar.tmp"
+  done < <(find "$tmpdir" -maxdepth 1 -type f -name 'rwps_*.png')
+
+  rm -rf "$tmpdir"
+
+  if [[ ! -s "$sidecar.tmp" ]]; then
+    rm -f "$sidecar.tmp"
+    return 1
+  fi
+  mv -f "$sidecar.tmp" "$sidecar"
 }
 
-# Apply on startup
+# --- Apply with fast-path lookup --------------------------------------------
+
+apply_wallpaper() {
+  sleep 0.3
+  local image sidecar img_hash
+
+  # Resolve the symlink to the actual image file.
+  image="$(readlink -f "$BACKGROUND" 2>/dev/null || true)"
+  [[ -n "$image" && -f "$image" ]] || return 0
+
+  # Content-addressed sidecar: hash the image so the same file always
+  # reuses its cached tiles (same scheme as wallpaper-pick).
+  img_hash="$(sha256sum "$image" | cut -d' ' -f1)"
+  sidecar="$CACHE_DIR/.pick_${img_hash}.tiles"
+
+  # Also check the omarchy-random-wallpaper cache for a ready sidecar.
+  local omarchy_sidecar="$HOME/.cache/omarchy-random-wallpaper/.current.tiles"
+  if [[ -s "$omarchy_sidecar" ]]; then
+    local omarchy_current
+    omarchy_current="$(readlink -f "$HOME/.cache/omarchy-random-wallpaper/current".* 2>/dev/null | head -1 || true)"
+    if [[ -n "$omarchy_current" && "$omarchy_current" == "$image" ]]; then
+      sidecar="$omarchy_sidecar"
+    fi
+  fi
+
+  # Split tiles if not already cached.
+  if [[ ! -s "$sidecar" ]]; then
+    split_image_to_tiles "$image" "$sidecar" || true
+  fi
+
+  # Apply via the wallpaper helper (fast IPC path if tiles exist).
+  if [[ -s "$sidecar" ]]; then
+    "$WALLPAPER_HELPER" --tiles "$sidecar" "$image" 2>/dev/null
+  else
+    "$WALLPAPER_HELPER" "$image" 2>/dev/null
+  fi
+}
+
+# Apply on startup (uses fast path if tiles are cached).
 apply_wallpaper
 
-# Watch directory for any changes to the background symlink
+# Watch directory for any changes to the background symlink.
 inotifywait -m -e create,delete,modify,moved_to,attrib "$WATCH_DIR" 2>/dev/null | while read -r dir event file; do
     if [[ "$file" == "background" ]]; then
         # If the wallpaper helper already applied via IPC, skip the redundant
