@@ -123,4 +123,9 @@ command -v rwpspread >/dev/null 2>&1 || {
   exit 1
 }
 
-exec rwpspread -b hyprpaper -i "$IMAGE"
+# Timeout: rwpspread -b hyprpaper communicates with hyprpaper via a Unix
+# socket. On hyprpaper 0.8.3 this IPC can deadlock — rwpspread waits for
+# a response that never comes, hanging indefinitely and holding any
+# parent flock. 30s is generous (normal apply is 2-3s) but ensures the
+# process is killed and the lock is released.
+exec timeout 30 rwpspread -b hyprpaper -i "$IMAGE"
