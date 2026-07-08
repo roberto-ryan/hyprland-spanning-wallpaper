@@ -40,6 +40,20 @@ Opens a GTK file chooser with thumbnail previews. Tiles are cached by image hash
 wallpaper /path/to/image.jpg
 ```
 
+### Diagnostics
+```bash
+wallpaper --status              # monitor + cache overview
+wallpaper-random status         # omarchy cache health
+wallpaper-random repair         # fix broken sidecars + clean orphaned tiles
+wallpaper-random gc             # manual garbage collection
+```
+
+### Debug mode
+```bash
+WALLPAPER_DEBUG=1 wallpaper-random     # verbose output
+WALLPAPER_DEBUG=1 wallpaper-watcher   # verbose watcher logging
+```
+
 ### Hyprland keybindings
 ```conf
 bindd = SUPER ALT, W, Random wallpaper, exec, ~/.local/bin/wallpaper-random
