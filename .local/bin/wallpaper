@@ -61,17 +61,25 @@ print_status() {
   echo "=== omarchy-random-wallpaper cache ==="
   local cache="$HOME/.cache/omarchy-random-wallpaper"
   if [[ -d "$cache" ]]; then
-    local slots tiles sidecars broken orphaned
-    slots=$(ls "$cache"/slot-*.jpg "$cache"/slot-*.png "$cache"/slot-*.webp 2>/dev/null | wc -l)
-    tiles=$(ls "$cache"/tiles/*.jpg 2>/dev/null | wc -l)
-    sidecars=$(ls "$cache"/.*.tiles 2>/dev/null | wc -l)
+    local slots=0 tiles=0 sidecars=0 broken=0 orphaned=0
+    # Count with bash globs (no subshell exit on no-match with nullglob).
+    shopt -s nullglob
+    for f in "$cache"/slot-*.jpg "$cache"/slot-*.png "$cache"/slot-*.webp; do
+      [[ -f "$f" ]] && slots=$((slots+1))
+    done
+    for f in "$cache"/tiles/*.jpg; do
+      [[ -f "$f" ]] && tiles=$((tiles+1))
+    done
+    for f in "$cache"/.*.tiles; do
+      [[ -f "$f" ]] && sidecars=$((sidecars+1))
+    done
+    shopt -u nullglob
     echo "  slots: $slots"
     echo "  tiles: $tiles"
     echo "  sidecars: $sidecars"
     echo "  .head: $(cat "$cache/.head" 2>/dev/null || echo '?')"
     echo "  disk: $(du -sh "$cache" 2>/dev/null | cut -f1)"
     # Check for broken sidecars
-    broken=0
     for sc in "$cache"/.*.tiles; do
       [[ -f "$sc" ]] || continue
       while IFS= read -r tile || [[ -n "$tile" ]]; do
@@ -79,7 +87,7 @@ print_status() {
         [[ -f "$tile" ]] || { broken=$((broken+1)); break; }
       done <"$sc" 2>/dev/null
     done
-    [[ "$broken" -gt 0 ]] && echo "  WARNING: $broken broken sidecar(s) (tiles missing)"
+    [[ "$broken" -gt 0 ]] && echo "  WARNING: $broken broken sidecar(s) (tiles missing)" || true
     # Check for orphaned tiles
     local ref tmp
     tmp=$(mktemp)
@@ -87,13 +95,12 @@ print_status() {
       [[ -f "$sc" ]] || continue
       cat "$sc" >>"$tmp" 2>/dev/null
     done
-    orphaned=0
     for tile in "$cache"/tiles/*.jpg; do
       [[ -f "$tile" ]] || continue
       grep -qF "$tile" "$tmp" 2>/dev/null || orphaned=$((orphaned+1))
     done
     rm -f "$tmp"
-    [[ "$orphaned" -gt 0 ]] && echo "  WARNING: $orphaned orphaned tile(s) (not referenced)"
+    [[ "$orphaned" -gt 0 ]] && echo "  WARNING: $orphaned orphaned tile(s) (not referenced)" || true
   else
     echo "  no cache directory"
   fi
@@ -101,7 +108,13 @@ print_status() {
   echo "=== wallpaper-pick cache ==="
   local pc="$HOME/.cache/wallpaper-pick"
   if [[ -d "$pc" ]]; then
-    echo "  tiles: $(ls "$pc"/tiles/*.jpg 2>/dev/null | wc -l)"
+    local pc_tiles=0
+    shopt -s nullglob
+    for f in "$pc"/tiles/*.jpg; do
+      [[ -f "$f" ]] && pc_tiles=$((pc_tiles+1))
+    done
+    shopt -u nullglob
+    echo "  tiles: $pc_tiles"
     echo "  disk: $(du -sh "$pc" 2>/dev/null | cut -f1)"
   else
     echo "  no cache directory"
