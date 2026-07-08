@@ -3,6 +3,13 @@
 # applies the image across all monitors. Two modes:
 #   - With pre-split tile sidecar: issue hyprpaper IPC directly (fast path).
 #   - Without: run rwpspread -b hyprpaper (does the split inline).
+#
+# Commands:
+#   wallpaper <path>                   Set spanning wallpaper from file.
+#   wallpaper --tiles <sidecar> <path> Apply pre-split tiles (fast IPC path).
+#   wallpaper --refresh                Reapply the current background.
+#   wallpaper --status                 Print cache/monitor diagnostics.
+#   wallpaper                          Print the current wallpaper path.
 set -euo pipefail
 
 LINK="$HOME/.config/omarchy/current/background"
@@ -14,11 +21,94 @@ usage() {
 Usage: wallpaper <path>                       Set spanning wallpaper from file.
        wallpaper --tiles <sidecar> <path>     Apply pre-split tiles listed in <sidecar>.
        wallpaper --refresh                    Reapply the current background (no symlink change).
+       wallpaper --status                      Print monitor + cache diagnostics.
        wallpaper                              Print the current wallpaper path.
 
 <sidecar> is a text file with one absolute tile path per line; tile filenames
-must be of the form rwps_<MONITOR>_<HASH>.png (as produced by rwpspread).
+must be of the form rwps_<MONITOR>_<HASH>.jpg (content-addressed by sha256).
 USAGE
+}
+
+# --- --status: diagnostic dump (no side effects) ---
+print_status() {
+  echo "=== Monitors ==="
+  hyprctl monitors 2>/dev/null | grep -E '^Monitor|description' || echo "  hyprctl unavailable"
+  echo
+  echo "=== Current background ==="
+  if [[ -L "$LINK" ]]; then
+    local img
+    img="$(readlink -f "$LINK" 2>/dev/null || true)"
+    echo "  link: $LINK -> $img"
+    [[ -n "$img" && -f "$img" ]] && file "$img" | sed 's/^/  /' || echo "  (target missing)"
+  else
+    echo "  no background symlink at $LINK"
+  fi
+  echo
+  echo "=== hyprpaper ==="
+  local hp_pid
+  hp_pid="$(pgrep -x hyprpaper 2>/dev/null || true)"
+  if [[ -n "$hp_pid" ]]; then
+    echo "  running (PID $hp_pid)"
+    grep -q 'ipc = true' "$HOME/.config/hypr/hyprpaper.conf" 2>/dev/null \
+      && echo "  ipc = true" || echo "  WARNING: ipc not enabled in hyprpaper.conf"
+  else
+    echo "  NOT running"
+  fi
+  echo
+  echo "=== rwpspread ==="
+  command -v rwpspread >/dev/null 2>&1 && echo "  $(rwpspread --version 2>&1 || echo 'installed')" || echo "  NOT installed"
+  echo
+  echo "=== omarchy-random-wallpaper cache ==="
+  local cache="$HOME/.cache/omarchy-random-wallpaper"
+  if [[ -d "$cache" ]]; then
+    local slots tiles sidecars broken orphaned
+    slots=$(ls "$cache"/slot-*.jpg "$cache"/slot-*.png "$cache"/slot-*.webp 2>/dev/null | wc -l)
+    tiles=$(ls "$cache"/tiles/*.jpg 2>/dev/null | wc -l)
+    sidecars=$(ls "$cache"/.*.tiles 2>/dev/null | wc -l)
+    echo "  slots: $slots"
+    echo "  tiles: $tiles"
+    echo "  sidecars: $sidecars"
+    echo "  .head: $(cat "$cache/.head" 2>/dev/null || echo '?')"
+    echo "  disk: $(du -sh "$cache" 2>/dev/null | cut -f1)"
+    # Check for broken sidecars
+    broken=0
+    for sc in "$cache"/.*.tiles; do
+      [[ -f "$sc" ]] || continue
+      while IFS= read -r tile || [[ -n "$tile" ]]; do
+        [[ -n "$tile" ]] || continue
+        [[ -f "$tile" ]] || { broken=$((broken+1)); break; }
+      done <"$sc" 2>/dev/null
+    done
+    [[ "$broken" -gt 0 ]] && echo "  WARNING: $broken broken sidecar(s) (tiles missing)"
+    # Check for orphaned tiles
+    local ref tmp
+    tmp=$(mktemp)
+    for sc in "$cache"/.*.tiles; do
+      [[ -f "$sc" ]] || continue
+      cat "$sc" >>"$tmp" 2>/dev/null
+    done
+    orphaned=0
+    for tile in "$cache"/tiles/*.jpg; do
+      [[ -f "$tile" ]] || continue
+      grep -qF "$tile" "$tmp" 2>/dev/null || orphaned=$((orphaned+1))
+    done
+    rm -f "$tmp"
+    [[ "$orphaned" -gt 0 ]] && echo "  WARNING: $orphaned orphaned tile(s) (not referenced)"
+  else
+    echo "  no cache directory"
+  fi
+  echo
+  echo "=== wallpaper-pick cache ==="
+  local pc="$HOME/.cache/wallpaper-pick"
+  if [[ -d "$pc" ]]; then
+    echo "  tiles: $(ls "$pc"/tiles/*.jpg 2>/dev/null | wc -l)"
+    echo "  disk: $(du -sh "$pc" 2>/dev/null | cut -f1)"
+  else
+    echo "  no cache directory"
+  fi
+  echo
+  echo "=== Processes ==="
+  pgrep -af 'wallpaper-watcher|wallpaper-random|hyprpaper|rwpspread' 2>/dev/null | grep -v 'grep\|hermes' | sed 's/^/  /' || echo "  none"
 }
 
 case "${1:-}" in
@@ -34,12 +124,31 @@ case "${1:-}" in
     usage
     exit 0
     ;;
+  --status)
+    print_status
+    exit 0
+    ;;
   --refresh | -r)
     IMAGE="$(readlink -f "$LINK" 2>/dev/null || true)"
     [[ -n "$IMAGE" && -f "$IMAGE" ]] || {
       echo "wallpaper: no current background to refresh" >&2
       exit 1
     }
+    # Try to find a pre-split tile sidecar for this image so we use
+    # the fast IPC path instead of falling back to rwpspread.
+    # Check omarchy-random-wallpaper cache first, then wallpaper-pick.
+    omarchy_sc="$HOME/.cache/omarchy-random-wallpaper/.current.tiles"
+    if [[ -s "$omarchy_sc" ]]; then
+      omarchy_img="$(readlink -f "$HOME/.cache/omarchy-random-wallpaper/current".* 2>/dev/null | head -1 || true)"
+      if [[ -n "$omarchy_img" && "$omarchy_img" == "$IMAGE" ]]; then
+        TILES_SIDECAR="$omarchy_sc"
+      fi
+    fi
+    if [[ -z "$TILES_SIDECAR" ]]; then
+      pick_hash="$(sha256sum "$IMAGE" | cut -d' ' -f1)"
+      pick_sc="$HOME/.cache/wallpaper-pick/.pick_${pick_hash}.tiles"
+      [[ -s "$pick_sc" ]] && TILES_SIDECAR="$pick_sc"
+    fi
     ;;
   --tiles)
     TILES_SIDECAR="${2:-}"

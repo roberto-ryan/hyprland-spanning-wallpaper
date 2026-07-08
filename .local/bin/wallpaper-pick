@@ -56,7 +56,7 @@ split_image_to_tiles() {
       }
     fi
     printf '%s\n' "$dest_jpg" >>"$sidecar.tmp"
-  done < <(find "$tmpdir" -maxdepth 1 -type f -name 'rwps_*.png')
+  done < <(printf '%s\n' "$tmpdir"/rwps_*.png)
 
   rm -rf "$tmpdir"
 

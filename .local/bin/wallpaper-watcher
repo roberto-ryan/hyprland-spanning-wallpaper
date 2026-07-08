@@ -20,7 +20,6 @@ TILE_QUALITY="${WALLPAPER_PICK_TILE_QUALITY:-92}"
 mkdir -p "$TILES_DIR"
 
 # --- Single-instance guard --------------------------------------------------
-# Prevent multiple watchers from running (e.g. after Hyprland reload).
 exec 8>"$CACHE_DIR/.watcher.lock"
 if command -v flock >/dev/null 2>&1; then
   flock -n 8 || { echo "wallpaper-watcher: already running"; exit 0; }
@@ -30,7 +29,7 @@ fi
 
 split_image_to_tiles() {
   local image="$1" sidecar="$2"
-  local tmpdir png base stem hash mon dest_jpg img_hash
+  local tmpdir png base stem mon dest_jpg img_hash
 
   command -v rwpspread >/dev/null 2>&1 || return 1
   command -v magick    >/dev/null 2>&1 || return 1
@@ -55,7 +54,6 @@ split_image_to_tiles() {
     else
       continue
     fi
-    # Use our deterministic hash, not rwpspread's non-deterministic one.
     dest_jpg="$TILES_DIR/rwps_${mon}_${img_hash}.jpg"
     if [[ ! -f "$dest_jpg" ]]; then
       magick "$png" -quality "$TILE_QUALITY" -strip "$dest_jpg" 2>/dev/null || {
@@ -64,7 +62,7 @@ split_image_to_tiles() {
       }
     fi
     printf '%s\n' "$dest_jpg" >>"$sidecar.tmp"
-  done < <(find "$tmpdir" -maxdepth 1 -type f -name 'rwps_*.png')
+  done < <(printf '%s\n' "$tmpdir"/rwps_*.png)
 
   rm -rf "$tmpdir"
 
@@ -81,7 +79,6 @@ apply_wallpaper() {
   sleep 0.3
   local image sidecar img_hash
 
-  # Resolve the symlink to the actual image file.
   image="$(readlink -f "$BACKGROUND" 2>/dev/null || true)"
   [[ -n "$image" && -f "$image" ]] || return 0
 
@@ -91,10 +88,11 @@ apply_wallpaper() {
   sidecar="$CACHE_DIR/.pick_${img_hash}.tiles"
 
   # Also check the omarchy-random-wallpaper cache for a ready sidecar.
-  local omarchy_sidecar="$HOME/.cache/omarchy-random-wallpaper/.current.tiles"
+  local omarchy_cache="$HOME/.cache/omarchy-random-wallpaper"
+  local omarchy_sidecar="$omarchy_cache/.current.tiles"
   if [[ -s "$omarchy_sidecar" ]]; then
     local omarchy_current
-    omarchy_current="$(readlink -f "$HOME/.cache/omarchy-random-wallpaper/current".* 2>/dev/null | head -1 || true)"
+    omarchy_current="$(readlink -f "$omarchy_cache/current".* 2>/dev/null | head -1 || true)"
     if [[ -n "$omarchy_current" && "$omarchy_current" == "$image" ]]; then
       sidecar="$omarchy_sidecar"
     fi
@@ -102,29 +100,34 @@ apply_wallpaper() {
 
   # Split tiles if not already cached.
   if [[ ! -s "$sidecar" ]]; then
+    [[ "${WALLPAPER_DEBUG:-}" == "1" ]] && echo "wallpaper-watcher: splitting tiles for $image" >&2
     split_image_to_tiles "$image" "$sidecar" || true
+  else
+    [[ "${WALLPAPER_DEBUG:-}" == "1" ]] && echo "wallpaper-watcher: using cached sidecar $sidecar" >&2
   fi
 
   # Apply via the wallpaper helper (fast IPC path if tiles exist).
   if [[ -s "$sidecar" ]]; then
-    "$WALLPAPER_HELPER" --tiles "$sidecar" "$image" 2>/dev/null
+    timeout 30 "$WALLPAPER_HELPER" --tiles "$sidecar" "$image" 2>/dev/null || true
   else
-    "$WALLPAPER_HELPER" "$image" 2>/dev/null
+    timeout 30 "$WALLPAPER_HELPER" "$image" 2>/dev/null || true
   fi
 }
 
 # Apply on startup (uses fast path if tiles are cached).
+[[ "${WALLPAPER_DEBUG:-}" == "1" ]] && echo "wallpaper-watcher: starting, applying current background" >&2
 apply_wallpaper
 
 # Watch directory for any changes to the background symlink.
+[[ "${WALLPAPER_DEBUG:-}" == "1" ]] && echo "wallpaper-watcher: watching $WATCH_DIR" >&2
 inotifywait -m -e create,delete,modify,moved_to,attrib "$WATCH_DIR" 2>/dev/null | while read -r dir event file; do
     if [[ "$file" == "background" ]]; then
-        # If the wallpaper helper already applied via IPC, skip the redundant
-        # rwpspread re-apply that would cause a visible flash.
         if [[ -f "$SKIP_FILE" ]]; then
             rm -f "$SKIP_FILE"
+            [[ "${WALLPAPER_DEBUG:-}" == "1" ]] && echo "wallpaper-watcher: skip file set, skipping" >&2
             continue
         fi
+        [[ "${WALLPAPER_DEBUG:-}" == "1" ]] && echo "wallpaper-watcher: background changed, applying" >&2
         apply_wallpaper
     fi
 done
